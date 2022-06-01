@@ -27,12 +27,39 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
         pub const SecretKey = Curve.scalar.CompressedScalar;
         /// An ECDSA public key.
         pub const PublicKey = Curve;
+
         /// An ECDSA signature.
         pub const Signature = struct {
             /// The R component of an ECDSA signature.
             r: Curve.scalar.CompressedScalar,
             /// The S component of an ECDSA signature.
             s: Curve.scalar.CompressedScalar,
+
+            pub fn verify(self: Signature, msg: []const u8, public_key: PublicKey) (IdentityElementError || NonCanonicalError || SignatureVerificationError)!void {
+                const r = try Curve.scalar.Scalar.fromBytes(self.r, .Big);
+                const s = try Curve.scalar.Scalar.fromBytes(self.s, .Big);
+                if (r.isZero() or s.isZero()) return error.IdentityElement;
+
+                var h: [Hash.digest_length]u8 = undefined;
+                Hash.hash(msg, &h, .{});
+
+                const ht = Curve.scalar.encoded_length;
+                const z = reduceToScalar(ht, h[0..ht].*);
+                if (z.isZero()) {
+                    return error.SignatureVerificationFailed;
+                }
+
+                const s_inv = s.invert();
+                const v1 = z.mul(s_inv).toBytes(.Little);
+                const v2 = r.mul(s_inv).toBytes(.Little);
+                const v1g = try Curve.basePoint.mulPublic(v1, .Little);
+                const v2pk = try public_key.mulPublic(v2, .Little);
+                const vxs = v1g.add(v2pk).affineCoordinates().x.toBytes(.Big);
+                const vr = reduceToScalar(Curve.Fe.encoded_length, vxs);
+                if (!r.equivalent(vr)) {
+                    return error.SignatureVerificationFailed;
+                }
+            }
 
             pub fn to_compact(self: Signature) [signature_length]u8 {
                 var bytes: [signature_length]u8 = undefined;
@@ -147,32 +174,6 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
             return Signature{ .r = r.toBytes(.Big), .s = s.toBytes(.Big) };
         }
 
-        pub fn verify(sig: Signature, msg: []const u8, public_key: PublicKey) (IdentityElementError || NonCanonicalError || SignatureVerificationError)!void {
-            const r = try Curve.scalar.Scalar.fromBytes(sig.r, .Big);
-            const s = try Curve.scalar.Scalar.fromBytes(sig.s, .Big);
-            if (r.isZero() or s.isZero()) return error.IdentityElement;
-
-            var h: [Hash.digest_length]u8 = undefined;
-            Hash.hash(msg, &h, .{});
-
-            const ht = Curve.scalar.encoded_length;
-            const z = reduceToScalar(ht, h[0..ht].*);
-            if (z.isZero()) {
-                return error.SignatureVerificationFailed;
-            }
-
-            const s_inv = s.invert();
-            const v1 = z.mul(s_inv).toBytes(.Little);
-            const v2 = r.mul(s_inv).toBytes(.Little);
-            const v1g = try Curve.basePoint.mulPublic(v1, .Little);
-            const v2pk = try public_key.mulPublic(v2, .Little);
-            const vxs = v1g.add(v2pk).affineCoordinates().x.toBytes(.Big);
-            const vr = reduceToScalar(Curve.Fe.encoded_length, vxs);
-            if (!r.equivalent(vr)) {
-                return error.SignatureVerificationFailed;
-            }
-        }
-
         fn reduceToScalar(comptime unreduced_len: usize, s: [unreduced_len]u8) Curve.scalar.Scalar {
             if (unreduced_len >= 48) {
                 var xs = [_]u8{0} ** 64;
@@ -236,12 +237,12 @@ pub fn main() anyerror!void {
     const sig2 = try Scheme.Signature.from_der(der);
     std.debug.print("{s}\n", .{std.fmt.fmtSliceHexLower(&sig2.to_compact())});
 
-    try Scheme.verify(sig, msg, kp.public_key);
+    try sig.verify(msg, kp.public_key);
 
     const Scheme2 = Ecdsa(crypto.ecc.P384, crypto.hash.sha2.Sha384);
     const raw_sk: [48]u8 = .{ 32, 52, 118, 9, 96, 116, 119, 172, 168, 251, 251, 197, 230, 33, 132, 85, 243, 25, 150, 105, 121, 46, 248, 180, 102, 250, 168, 123, 220, 103, 121, 129, 68, 200, 72, 221, 3, 102, 30, 237, 90, 198, 36, 97, 52, 12, 234, 150 };
     const sk = try Scheme2.KeyPair.fromSecretKey(raw_sk);
     const raw_sig: [96]u8 = .{ 192, 233, 12, 152, 202, 13, 215, 5, 221, 225, 105, 76, 100, 188, 6, 234, 26, 45, 213, 166, 72, 21, 167, 112, 121, 34, 50, 175, 194, 137, 21, 42, 253, 245, 34, 125, 21, 88, 71, 191, 18, 53, 136, 149, 28, 251, 115, 204, 181, 93, 139, 88, 188, 79, 5, 169, 71, 40, 9, 15, 148, 214, 188, 54, 94, 148, 115, 224, 42, 214, 54, 162, 177, 37, 23, 220, 59, 3, 182, 43, 157, 172, 8, 123, 107, 31, 74, 4, 91, 134, 24, 195, 95, 103, 241, 11 };
     const sig3 = Scheme2.Signature.from_compact(raw_sig);
-    try Scheme2.verify(sig3, "test", sk.public_key);
+    try sig3.verify("test", sk.public_key);
 }
