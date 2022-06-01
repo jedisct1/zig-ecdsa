@@ -150,30 +150,32 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
                 const public_key = try Curve.basePoint.mul(secret_key, .Big);
                 return KeyPair{ .secret_key = secret_key, .public_key = public_key };
             }
+
+            pub fn sign(key_pair: KeyPair, msg: []const u8, noise: ?[noise_length]u8) (IdentityElementError || NonCanonicalError)!Signature {
+                const secret_key = key_pair.secret_key;
+
+                var h: [Hash.digest_length]u8 = undefined;
+                Hash.hash(msg, &h, .{});
+
+                const scalar_encoded_length = Curve.scalar.encoded_length;
+                std.debug.assert(h.len >= scalar_encoded_length);
+                const z = reduceToScalar(scalar_encoded_length, h[0..scalar_encoded_length].*);
+
+                const k = deterministicScalar(h, secret_key, noise);
+
+                const p = try Curve.basePoint.mul(k.toBytes(.Big), .Big);
+                const xs = p.affineCoordinates().x.toBytes(.Big);
+                const r = reduceToScalar(Curve.Fe.encoded_length, xs);
+                if (r.isZero()) return error.IdentityElement;
+
+                const k_inv = k.invert();
+                const zrs = z.add(r.mul(try Curve.scalar.Scalar.fromBytes(secret_key, .Big)));
+                const s = k_inv.mul(zrs);
+                if (s.isZero()) return error.IdentityElement;
+
+                return Signature{ .r = r.toBytes(.Big), .s = s.toBytes(.Big) };
+            }
         };
-
-        pub fn sign(msg: []const u8, secret_key: SecretKey, noise: ?[noise_length]u8) (IdentityElementError || NonCanonicalError)!Signature {
-            var h: [Hash.digest_length]u8 = undefined;
-            Hash.hash(msg, &h, .{});
-
-            const scalar_encoded_length = Curve.scalar.encoded_length;
-            std.debug.assert(h.len >= scalar_encoded_length);
-            const z = reduceToScalar(scalar_encoded_length, h[0..scalar_encoded_length].*);
-
-            const k = deterministicScalar(h, secret_key, noise);
-
-            const p = try Curve.basePoint.mul(k.toBytes(.Big), .Big);
-            const xs = p.affineCoordinates().x.toBytes(.Big);
-            const r = reduceToScalar(Curve.Fe.encoded_length, xs);
-            if (r.isZero()) return error.IdentityElement;
-
-            const k_inv = k.invert();
-            const zrs = z.add(r.mul(try Curve.scalar.Scalar.fromBytes(secret_key, .Big)));
-            const s = k_inv.mul(zrs);
-            if (s.isZero()) return error.IdentityElement;
-
-            return Signature{ .r = r.toBytes(.Big), .s = s.toBytes(.Big) };
-        }
 
         fn reduceToScalar(comptime unreduced_len: usize, s: [unreduced_len]u8) Curve.scalar.Scalar {
             if (unreduced_len >= 48) {
@@ -228,7 +230,7 @@ pub fn main() anyerror!void {
 
     var noise: [Scheme.noise_length]u8 = undefined;
     crypto.random.bytes(&noise);
-    var sig = try Scheme.sign(msg, kp.secret_key, noise);
+    var sig = try kp.sign(msg, noise);
 
     std.debug.print("{s}\n", .{std.fmt.fmtSliceHexLower(&sig.to_raw())});
 
