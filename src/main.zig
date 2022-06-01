@@ -14,10 +14,6 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
     return struct {
         /// Length (in bytes) of a compressed secret key.
         pub const secret_length = Curve.scalar.encoded_length;
-        /// Length (in bytes) of a signature.
-        pub const signature_length = Curve.scalar.encoded_length * 2;
-        /// Maximum length (in bytes) of a DER-encoded signature.
-        pub const max_der_signature_length = signature_length + 2 + 2 * 3;
         /// Length (in bytes) of optional random bytes, for non-deterministic signatures.
         pub const noise_length = Curve.scalar.encoded_length;
         /// Length (in bytes) of a seed required to create a key pair.
@@ -30,6 +26,11 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
 
         /// An ECDSA signature.
         pub const Signature = struct {
+            /// Length (in bytes) of a raw signature.
+            pub const raw_encoded_length = Curve.scalar.encoded_length * 2;
+            /// Maximum length (in bytes) of a DER-encoded signature.
+            pub const der_encoded_max_length = raw_encoded_length + 2 + 2 * 3;
+
             /// The R component of an ECDSA signature.
             r: Curve.scalar.CompressedScalar,
             /// The S component of an ECDSA signature.
@@ -61,21 +62,21 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
                 }
             }
 
-            pub fn to_compact(self: Signature) [signature_length]u8 {
-                var bytes: [signature_length]u8 = undefined;
-                mem.copy(u8, bytes[0 .. signature_length / 2], &self.r);
-                mem.copy(u8, bytes[signature_length / 2 ..], &self.s);
+            pub fn to_raw(self: Signature) [raw_encoded_length]u8 {
+                var bytes: [raw_encoded_length]u8 = undefined;
+                mem.copy(u8, bytes[0 .. raw_encoded_length / 2], &self.r);
+                mem.copy(u8, bytes[raw_encoded_length / 2 ..], &self.s);
                 return bytes;
             }
 
-            pub fn from_compact(bytes: [signature_length]u8) Signature {
+            pub fn from_raw(bytes: [raw_encoded_length]u8) Signature {
                 return Signature{
-                    .r = bytes[0 .. signature_length / 2].*,
-                    .s = bytes[signature_length / 2 ..].*,
+                    .r = bytes[0 .. raw_encoded_length / 2].*,
+                    .s = bytes[raw_encoded_length / 2 ..].*,
                 };
             }
 
-            pub fn to_der(self: Signature, buf: *[max_der_signature_length]u8) []u8 {
+            pub fn to_der(self: Signature, buf: *[der_encoded_max_length]u8) []u8 {
                 var fb = io.fixedBufferStream(buf);
                 const w = fb.writer();
                 const r_len = @intCast(u8, self.r.len + (self.r[0] >> 7));
@@ -229,13 +230,13 @@ pub fn main() anyerror!void {
     crypto.random.bytes(&noise);
     var sig = try Scheme.sign(msg, kp.secret_key, noise);
 
-    std.debug.print("{s}\n", .{std.fmt.fmtSliceHexLower(&sig.to_compact())});
+    std.debug.print("{s}\n", .{std.fmt.fmtSliceHexLower(&sig.to_raw())});
 
-    var buf: [Scheme.max_der_signature_length]u8 = undefined;
+    var buf: [Scheme.Signature.der_encoded_max_length]u8 = undefined;
     const der = sig.to_der(&buf);
     std.debug.print("{s}\n", .{std.fmt.fmtSliceHexLower(der)});
     const sig2 = try Scheme.Signature.from_der(der);
-    std.debug.print("{s}\n", .{std.fmt.fmtSliceHexLower(&sig2.to_compact())});
+    std.debug.print("{s}\n", .{std.fmt.fmtSliceHexLower(&sig2.to_raw())});
 
     try sig.verify(msg, kp.public_key);
 
@@ -243,6 +244,6 @@ pub fn main() anyerror!void {
     const raw_sk: [48]u8 = .{ 32, 52, 118, 9, 96, 116, 119, 172, 168, 251, 251, 197, 230, 33, 132, 85, 243, 25, 150, 105, 121, 46, 248, 180, 102, 250, 168, 123, 220, 103, 121, 129, 68, 200, 72, 221, 3, 102, 30, 237, 90, 198, 36, 97, 52, 12, 234, 150 };
     const sk = try Scheme2.KeyPair.fromSecretKey(raw_sk);
     const raw_sig: [96]u8 = .{ 192, 233, 12, 152, 202, 13, 215, 5, 221, 225, 105, 76, 100, 188, 6, 234, 26, 45, 213, 166, 72, 21, 167, 112, 121, 34, 50, 175, 194, 137, 21, 42, 253, 245, 34, 125, 21, 88, 71, 191, 18, 53, 136, 149, 28, 251, 115, 204, 181, 93, 139, 88, 188, 79, 5, 169, 71, 40, 9, 15, 148, 214, 188, 54, 94, 148, 115, 224, 42, 214, 54, 162, 177, 37, 23, 220, 59, 3, 182, 43, 157, 172, 8, 123, 107, 31, 74, 4, 91, 134, 24, 195, 95, 103, 241, 11 };
-    const sig3 = Scheme2.Signature.from_compact(raw_sig);
+    const sig3 = Scheme2.Signature.from_raw(raw_sig);
     try sig3.verify("test", sk.public_key);
 }
