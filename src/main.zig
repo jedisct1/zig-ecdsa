@@ -1,7 +1,9 @@
 const std = @import("std");
+const io = std.io;
 const mem = std.mem;
 const crypto = std.crypto;
 
+const EncodingError = crypto.errors.EncodingError;
 const IdentityElementError = crypto.errors.IdentityElementError;
 const NonCanonicalError = crypto.errors.NonCanonicalError;
 const SignatureVerificationError = crypto.errors.SignatureVerificationError;
@@ -14,6 +16,8 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
         pub const secret_length = Curve.scalar.encoded_length;
         /// Length (in bytes) of a signature.
         pub const signature_length = Curve.scalar.encoded_length * 2;
+        /// Maximum length (in bytes) of a DER-encoded signature.
+        pub const max_der_signature_length = signature_length + 2 + 2 * 3;
         /// Length (in bytes) of optional random bytes, for non-deterministic signatures.
         pub const noise_length = Curve.scalar.encoded_length;
         /// Length (in bytes) of a seed required to create a key pair.
@@ -23,6 +27,93 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
         pub const SecretKey = Curve.scalar.CompressedScalar;
         /// An ECDSA public key.
         pub const PublicKey = Curve;
+        /// An ECDSA signature.
+        pub const Signature = struct {
+            /// The R component of an ECDSA signature.
+            r: Curve.scalar.CompressedScalar,
+            /// The S component of an ECDSA signature.
+            s: Curve.scalar.CompressedScalar,
+
+            pub fn to_compact(self: Signature) [signature_length]u8 {
+                var bytes: [signature_length]u8 = undefined;
+                mem.copy(u8, bytes[0 .. signature_length / 2], &self.r);
+                mem.copy(u8, bytes[signature_length / 2 ..], &self.s);
+                return bytes;
+            }
+
+            pub fn from_compact(bytes: [signature_length]u8) Signature {
+                return Signature{
+                    .r = bytes[0 .. signature_length / 2],
+                    .s = bytes[signature_length / 2 ..],
+                };
+            }
+
+            pub fn to_der(self: Signature, buf: *[max_der_signature_length]u8) []u8 {
+                var w = io.fixedBufferStream(buf);
+                const r_len = @intCast(u8, self.r.len + (self.r[0] >> 7));
+                const s_len = @intCast(u8, self.s.len + (self.s[0] >> 7));
+                const seq_len = @intCast(u8, 2 + r_len + 2 + s_len);
+                _ = w.write(&[_]u8{ 0x30, seq_len }) catch unreachable;
+                _ = w.write(&[_]u8{ 0x02, r_len }) catch unreachable;
+                if (self.r[0] >> 7 != 0) {
+                    _ = w.write(&[_]u8{0x00}) catch unreachable;
+                }
+                _ = w.write(&self.r) catch unreachable;
+                _ = w.write(&[_]u8{ 0x02, s_len }) catch unreachable;
+                if (self.s[0] >> 7 != 0) {
+                    _ = w.write(&[_]u8{0x00}) catch unreachable;
+                }
+                _ = w.write(&self.s) catch unreachable;
+                return w.getWritten();
+            }
+
+            pub fn from_der(der: []const u8) EncodingError!Signature {
+                var sig: Signature = undefined;
+                var r = io.fixedBufferStream(der);
+                var buf: [2]u8 = undefined;
+                _ = try r.read(&buf);
+                if (buf[0] != 0x30 or @as(usize, buf[1]) + 2 != der.len) {
+                    std.debug.print("{} vs {}\n", .{ buf[1], der.len });
+                    return error.InvalidEncoding;
+                }
+
+                _ = try r.read(&buf);
+                if (buf[0] != 0x02) {
+                    return error.InvalidEncoding;
+                }
+                var r_len: usize = buf[1];
+                if (r_len == sig.r.len + 1) {
+                    _ = try r.read(buf[0..1]);
+                    if (buf[0] != 0x00) {
+                        return error.InvalidEncoding;
+                    }
+                    r_len -= 1;
+                }
+                if (r_len != sig.r.len) {
+                    return error.InvalidEncoding;
+                }
+                _ = try r.read(&sig.r);
+
+                _ = try r.read(&buf);
+                var s_len: usize = buf[1];
+                if (s_len == sig.s.len + 1) {
+                    _ = try r.read(buf[0..1]);
+                    if (buf[0] != 0x00) {
+                        return error.InvalidEncoding;
+                    }
+                    s_len -= 1;
+                }
+                if (s_len != sig.s.len) {
+                    return error.InvalidEncoding;
+                }
+                _ = try r.read(&sig.s);
+
+                if (r.getPos() catch unreachable != der.len) {
+                    return error.InvalidEncoding;
+                }
+                return sig;
+            }
+        };
 
         /// An ECDSA key pair.
         pub const KeyPair = struct {
@@ -44,7 +135,7 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
             }
         };
 
-        pub fn sign(msg: []const u8, secret_key: SecretKey, noise: ?[noise_length]u8) (IdentityElementError || NonCanonicalError)![signature_length]u8 {
+        pub fn sign(msg: []const u8, secret_key: SecretKey, noise: ?[noise_length]u8) (IdentityElementError || NonCanonicalError)!Signature {
             var h: [Hash.digest_length]u8 = undefined;
             Hash.hash(msg, &h, .{});
 
@@ -64,15 +155,12 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
             const s = k_inv.mul(zrs);
             if (s.isZero()) return error.IdentityElement;
 
-            var sig: [signature_length]u8 = undefined;
-            mem.copy(u8, sig[0..Curve.scalar.encoded_length], &r.toBytes(.Big));
-            mem.copy(u8, sig[Curve.scalar.encoded_length..], &s.toBytes(.Big));
-            return sig;
+            return Signature{ .r = r.toBytes(.Big), .s = s.toBytes(.Big) };
         }
 
-        pub fn verify(sig: [signature_length]u8, msg: []const u8, public_key: PublicKey) (IdentityElementError || NonCanonicalError || SignatureVerificationError)!void {
-            const r = try Curve.scalar.Scalar.fromBytes(sig[0..Curve.scalar.encoded_length].*, .Big);
-            const s = try Curve.scalar.Scalar.fromBytes(sig[Curve.scalar.encoded_length..].*, .Big);
+        pub fn verify(sig: Signature, msg: []const u8, public_key: PublicKey) (IdentityElementError || NonCanonicalError || SignatureVerificationError)!void {
+            const r = try Curve.scalar.Scalar.fromBytes(sig.r, .Big);
+            const s = try Curve.scalar.Scalar.fromBytes(sig.s, .Big);
             if (r.isZero() or s.isZero()) return error.IdentityElement;
 
             var h: [Hash.digest_length]u8 = undefined;
@@ -140,18 +228,24 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
 }
 
 pub fn main() anyerror!void {
-    const Curve = crypto.ecc.P384;
-    const Hash = crypto.hash.sha2.Sha384;
+    const Curve = crypto.ecc.P256;
+    const Hash = crypto.hash.sha2.Sha256;
 
     const Scheme = Ecdsa(Curve, Hash);
     const kp = try Scheme.KeyPair.create(null);
     const msg = "test";
 
     var noise: [Scheme.noise_length]u8 = undefined;
-    std.crypto.random.bytes(&noise);
+    crypto.random.bytes(&noise);
     var sig = try Scheme.sign(msg, kp.secret_key, noise);
 
-    std.debug.print("{s}\n", .{std.fmt.fmtSliceHexLower(&sig)});
+    std.debug.print("{s}\n", .{std.fmt.fmtSliceHexLower(&sig.to_compact())});
+
+    var buf: [Scheme.max_der_signature_length]u8 = undefined;
+    const der = sig.to_der(&buf);
+    std.debug.print("{s}\n", .{std.fmt.fmtSliceHexLower(der)});
+    const sig2 = try Scheme.Signature.from_der(der);
+    std.debug.print("{s}\n", .{std.fmt.fmtSliceHexLower(&sig2.to_compact())});
 
     try Scheme.verify(sig, msg, kp.public_key);
 }
