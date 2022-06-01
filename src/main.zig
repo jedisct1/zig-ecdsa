@@ -12,17 +12,32 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
     const Hmac = crypto.auth.hmac.Hmac(Hash);
 
     return struct {
-        /// Length (in bytes) of a compressed secret key.
-        pub const secret_length = Curve.scalar.encoded_length;
         /// Length (in bytes) of optional random bytes, for non-deterministic signatures.
         pub const noise_length = Curve.scalar.encoded_length;
-        /// Length (in bytes) of a seed required to create a key pair.
-        pub const seed_length = noise_length;
 
         /// An ECDSA secret key.
-        pub const SecretKey = Curve.scalar.CompressedScalar;
+        pub const SecretKey = struct {
+            /// Length (in bytes) of a raw secret key.
+            pub const raw_encoded_length = Curve.scalar.encoded_length;
+
+            raw: Curve.scalar.CompressedScalar,
+
+            pub fn init(raw: [raw_encoded_length]u8) SecretKey {
+                return SecretKey{ .raw = raw };
+            }
+        };
+
         /// An ECDSA public key.
-        pub const PublicKey = Curve;
+        pub const PublicKey = struct {
+            /// Length (in bytes) of a raw public key.
+            pub const raw_encoded_length = Curve.Fe.encoded_length;
+
+            raw: Curve,
+
+            pub fn init(raw: [raw_encoded_length]u8) PublicKey {
+                return PublicKey{ .raw = raw };
+            }
+        };
 
         /// An ECDSA signature.
         pub const Signature = struct {
@@ -54,7 +69,7 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
                 const v1 = z.mul(s_inv).toBytes(.Little);
                 const v2 = r.mul(s_inv).toBytes(.Little);
                 const v1g = try Curve.basePoint.mulPublic(v1, .Little);
-                const v2pk = try public_key.mulPublic(v2, .Little);
+                const v2pk = try public_key.raw.mulPublic(v2, .Little);
                 const vxs = v1g.add(v2pk).affineCoordinates().x.toBytes(.Big);
                 const vr = reduceToScalar(Curve.Fe.encoded_length, vxs);
                 if (!r.equivalent(vr)) {
@@ -134,6 +149,9 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
 
         /// An ECDSA key pair.
         pub const KeyPair = struct {
+            /// Length (in bytes) of a seed required to create a key pair.
+            pub const seed_length = noise_length;
+
             /// Public part.
             public_key: PublicKey,
             /// Secret scalar.
@@ -141,14 +159,14 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
 
             pub fn create(seed: ?[seed_length]u8) IdentityElementError!KeyPair {
                 const h = [_]u8{0x00} ** Hash.digest_length;
-                const k0 = [_]u8{0x01} ** secret_length;
+                const k0 = [_]u8{0x01} ** SecretKey.raw_encoded_length;
                 const secret_key = deterministicScalar(h, k0, seed).toBytes(.Big);
-                return fromSecretKey(secret_key);
+                return fromSecretKey(SecretKey{ .raw = secret_key });
             }
 
-            pub fn fromSecretKey(secret_key: [secret_length]u8) IdentityElementError!KeyPair {
-                const public_key = try Curve.basePoint.mul(secret_key, .Big);
-                return KeyPair{ .secret_key = secret_key, .public_key = public_key };
+            pub fn fromSecretKey(secret_key: SecretKey) IdentityElementError!KeyPair {
+                const public_key = try Curve.basePoint.mul(secret_key.raw, .Big);
+                return KeyPair{ .secret_key = secret_key, .public_key = PublicKey{ .raw = public_key } };
             }
 
             pub fn sign(key_pair: KeyPair, msg: []const u8, noise: ?[noise_length]u8) (IdentityElementError || NonCanonicalError)!Signature {
@@ -161,7 +179,7 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
                 std.debug.assert(h.len >= scalar_encoded_length);
                 const z = reduceToScalar(scalar_encoded_length, h[0..scalar_encoded_length].*);
 
-                const k = deterministicScalar(h, secret_key, noise);
+                const k = deterministicScalar(h, secret_key.raw, noise);
 
                 const p = try Curve.basePoint.mul(k.toBytes(.Big), .Big);
                 const xs = p.affineCoordinates().x.toBytes(.Big);
@@ -169,7 +187,7 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
                 if (r.isZero()) return error.IdentityElement;
 
                 const k_inv = k.invert();
-                const zrs = z.add(r.mul(try Curve.scalar.Scalar.fromBytes(secret_key, .Big)));
+                const zrs = z.add(r.mul(try Curve.scalar.Scalar.fromBytes(secret_key.raw, .Big)));
                 const s = k_inv.mul(zrs);
                 if (s.isZero()) return error.IdentityElement;
 
@@ -188,7 +206,7 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
             return Curve.scalar.Scalar.fromBytes48(xs, .Big);
         }
 
-        fn deterministicScalar(h: [Hash.digest_length]u8, secret_key: SecretKey, noise: ?[noise_length]u8) Curve.scalar.Scalar {
+        fn deterministicScalar(h: [Hash.digest_length]u8, secret_key: Curve.scalar.CompressedScalar, noise: ?[noise_length]u8) Curve.scalar.Scalar {
             var k = [_]u8{0x00} ** h.len;
             var m = [_]u8{0x00} ** (h.len + 1 + noise_length + secret_key.len + h.len);
             const m_v = m[0..h.len];
@@ -244,7 +262,7 @@ pub fn main() anyerror!void {
 
     const Scheme2 = Ecdsa(crypto.ecc.P384, crypto.hash.sha2.Sha384);
     const raw_sk: [48]u8 = .{ 32, 52, 118, 9, 96, 116, 119, 172, 168, 251, 251, 197, 230, 33, 132, 85, 243, 25, 150, 105, 121, 46, 248, 180, 102, 250, 168, 123, 220, 103, 121, 129, 68, 200, 72, 221, 3, 102, 30, 237, 90, 198, 36, 97, 52, 12, 234, 150 };
-    const sk = try Scheme2.KeyPair.fromSecretKey(raw_sk);
+    const sk = try Scheme2.KeyPair.fromSecretKey(Scheme2.SecretKey{ .raw = raw_sk });
     const raw_sig: [96]u8 = .{ 192, 233, 12, 152, 202, 13, 215, 5, 221, 225, 105, 76, 100, 188, 6, 234, 26, 45, 213, 166, 72, 21, 167, 112, 121, 34, 50, 175, 194, 137, 21, 42, 253, 245, 34, 125, 21, 88, 71, 191, 18, 53, 136, 149, 28, 251, 115, 204, 181, 93, 139, 88, 188, 79, 5, 169, 71, 40, 9, 15, 148, 214, 188, 54, 94, 148, 115, 224, 42, 214, 54, 162, 177, 37, 23, 220, 59, 3, 182, 43, 157, 172, 8, 123, 107, 31, 74, 4, 91, 134, 24, 195, 95, 103, 241, 11 };
     const sig3 = Scheme2.Signature.from_raw(raw_sig);
     try sig3.verify("test", sk.public_key);
