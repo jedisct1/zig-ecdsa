@@ -49,68 +49,57 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
             }
 
             pub fn to_der(self: Signature, buf: *[max_der_signature_length]u8) []u8 {
-                var w = io.fixedBufferStream(buf);
+                var fb = io.fixedBufferStream(buf);
+                const w = fb.writer();
                 const r_len = @intCast(u8, self.r.len + (self.r[0] >> 7));
                 const s_len = @intCast(u8, self.s.len + (self.s[0] >> 7));
                 const seq_len = @intCast(u8, 2 + r_len + 2 + s_len);
-                _ = w.write(&[_]u8{ 0x30, seq_len }) catch unreachable;
-                _ = w.write(&[_]u8{ 0x02, r_len }) catch unreachable;
+                w.writeAll(&[_]u8{ 0x30, seq_len }) catch unreachable;
+                w.writeAll(&[_]u8{ 0x02, r_len }) catch unreachable;
                 if (self.r[0] >> 7 != 0) {
-                    _ = w.write(&[_]u8{0x00}) catch unreachable;
+                    w.writeByte(0x00) catch unreachable;
                 }
-                _ = w.write(&self.r) catch unreachable;
-                _ = w.write(&[_]u8{ 0x02, s_len }) catch unreachable;
+                w.writeAll(&self.r) catch unreachable;
+                w.writeAll(&[_]u8{ 0x02, s_len }) catch unreachable;
                 if (self.s[0] >> 7 != 0) {
-                    _ = w.write(&[_]u8{0x00}) catch unreachable;
+                    w.writeByte(0x00) catch unreachable;
                 }
-                _ = w.write(&self.s) catch unreachable;
-                return w.getWritten();
+                w.writeAll(&self.s) catch unreachable;
+                return fb.getWritten();
             }
 
             pub fn from_der(der: []const u8) EncodingError!Signature {
                 var sig: Signature = undefined;
-                var r = io.fixedBufferStream(der);
+                var fb = io.fixedBufferStream(der);
+                const r = fb.reader();
                 var buf: [2]u8 = undefined;
-                _ = try r.read(&buf);
+                _ = r.readAll(&buf) catch return error.InvalidEncoding;
                 if (buf[0] != 0x30 or @as(usize, buf[1]) + 2 != der.len) {
                     std.debug.print("{} vs {}\n", .{ buf[1], der.len });
                     return error.InvalidEncoding;
                 }
 
-                _ = try r.read(&buf);
-                if (buf[0] != 0x02) {
-                    return error.InvalidEncoding;
-                }
+                _ = r.readAll(&buf) catch return error.InvalidEncoding;
+                if (buf[0] != 0x02) return error.InvalidEncoding;
                 var r_len: usize = buf[1];
                 if (r_len == sig.r.len + 1) {
-                    _ = try r.read(buf[0..1]);
-                    if (buf[0] != 0x00) {
-                        return error.InvalidEncoding;
-                    }
+                    if ((r.readByte() catch return error.InvalidEncoding) != 0x00) return error.InvalidEncoding;
                     r_len -= 1;
                 }
-                if (r_len != sig.r.len) {
-                    return error.InvalidEncoding;
-                }
-                _ = try r.read(&sig.r);
+                if (r_len != sig.r.len) return error.InvalidEncoding;
+                _ = r.readAll(&sig.r) catch return error.InvalidEncoding;
 
-                _ = try r.read(&buf);
+                _ = r.readAll(&buf) catch return error.InvalidEncoding;
                 var s_len: usize = buf[1];
                 if (s_len == sig.s.len + 1) {
-                    _ = try r.read(buf[0..1]);
-                    if (buf[0] != 0x00) {
-                        return error.InvalidEncoding;
-                    }
+                    if ((r.readByte() catch return error.InvalidEncoding) != 0x00) return error.InvalidEncoding;
                     s_len -= 1;
                 }
-                if (s_len != sig.s.len) {
-                    return error.InvalidEncoding;
-                }
-                _ = try r.read(&sig.s);
+                if (s_len != sig.s.len) return error.InvalidEncoding;
+                _ = r.read(&sig.s) catch return error.InvalidEncoding;
 
-                if (r.getPos() catch unreachable != der.len) {
-                    return error.InvalidEncoding;
-                }
+                if (fb.getPos() catch unreachable != der.len) return error.InvalidEncoding;
+
                 return sig;
             }
         };
