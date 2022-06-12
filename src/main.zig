@@ -1,8 +1,9 @@
 const std = @import("std");
-const io = std.io;
-const mem = std.mem;
 const crypto = std.crypto;
 const fmt = std.fmt;
+const io = std.io;
+const mem = std.mem;
+const testing = std.testing;
 
 const EncodingError = crypto.errors.EncodingError;
 const IdentityElementError = crypto.errors.IdentityElementError;
@@ -18,6 +19,7 @@ pub const EcdsaP384Sha384 = Ecdsa(crypto.ecc.P384, crypto.hash.sha2.Sha384);
 /// ECDSA over P-384 with SHA3-384.
 pub const EcdsaP256Sha3_384 = Ecdsa(crypto.ecc.P384, crypto.hash.sha3.Sha3_384);
 
+/// Elliptic Curve Digital Signature Algorithm (ECDSA).
 pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
     const Hmac = crypto.auth.hmac.Hmac(Hash);
 
@@ -291,7 +293,7 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
     };
 }
 
-pub fn main() anyerror!void {
+test "ECDSA - Basic operations" {
     const Scheme = EcdsaP384Sha384;
     const kp = try Scheme.KeyPair.create(null);
     const msg = "test";
@@ -303,8 +305,6 @@ pub fn main() anyerror!void {
 
     const sig2 = try kp.sign(msg, null);
     try sig2.verify(msg, kp.public_key);
-
-    try tv();
 }
 
 const TestVector = struct {
@@ -314,17 +314,7 @@ const TestVector = struct {
     result: enum { valid, invalid, acceptable },
 };
 
-fn derTest() anyerror!void {
-    const Scheme = EcdsaP256Sha256;
-    const sig_der_hex = "304402202ba3a8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e18022100b329f479a2bbd0a5c384ee1493b1f5186a87139cac5df4087c134b49156847";
-    var sig_der_: [70]u8 = undefined;
-    const sig_der = try fmt.hexToBytes(&sig_der_, sig_der_hex);
-    _ = try Scheme.Signature.fromDer(sig_der);
-    std.debug.print("{}\n", .{sig_der.len});
-}
-
-// ECDSA test vectors from Project Wycheproof.
-fn tv() !void {
+test "ECDSA - Test vectors from Project Wycheproof" {
     const vectors = [_]TestVector{
         .{ .key = "042927b10512bae3eddcfe467828128bad2903269919f7086069c8c4df6c732838c7787964eaac00e5921fb1498a60f4606766b3d9685001558d1a974e7341513e", .msg = "313233343030", .sig = "304402202ba3a8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e1802204cd60b855d442f5b3c7b11eb6c4e0ae7525fe710fab9aa7c77a67f79e6fadd76", .result = .valid },
         .{ .key = "042927b10512bae3eddcfe467828128bad2903269919f7086069c8c4df6c732838c7787964eaac00e5921fb1498a60f4606766b3d9685001558d1a974e7341513e", .msg = "313233343030", .sig = "304402202ba3a8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e180220b329f479a2bbd0a5c384ee1493b1f5186a87139cac5df4087c134b49156847db", .result = .acceptable },
@@ -714,32 +704,24 @@ fn tv() !void {
         .{ .key = "04bcbb2914c79f045eaa6ecbbc612816b3be5d2d6796707d8125e9f851c18af015fffffffeecad44b6f05d15b33146549c2297b522a5eed8430cff596758e6c43d", .msg = "4d657373616765", .sig = "30440220341c1b9ff3c83dd5e0dfa0bf68bcdf4bb7aa20c625975e5eeee34bb396266b34022072b69f061b750fd5121b22b11366fad549c634e77765a017902a67099e0a4469", .result = .valid },
         .{ .key = "04bcbb2914c79f045eaa6ecbbc612816b3be5d2d6796707d8125e9f851c18af015fffffffeecad44b6f05d15b33146549c2297b522a5eed8430cff596758e6c43d", .msg = "4d657373616765", .sig = "3045022070bebe684cdcb5ca72a42f0d873879359bd1781a591809947628d313a3814f67022100aec03aca8f5587a4d535fa31027bbe9cc0e464b1c3577f4c2dcde6b2094798a9", .result = .valid },
     };
-    for (vectors) |vector, i| {
+    for (vectors) |vector| {
         if (tvTry(vector)) {
-            if (vector.result != .valid and vector.result != .acceptable) {
-                std.debug.print("Invalid test case passed: {} (.key={s}, .sig={s})\n", .{ 1 + i, vector.key, vector.sig });
-            }
-        } else |err| {
-            if (vector.result == .valid) {
-                std.debug.print("Valid test case didn't pass: {} {}\n", .{ 1 + i, err });
-            }
+            try std.testing.expect(vector.result == .valid or vector.result == .acceptable);
+        } else |_| {
+            try std.testing.expectEqual(vector.result, .invalid);
         }
     }
 }
 
 fn tvTry(vector: TestVector) !void {
     const Scheme = EcdsaP256Sha256;
-
     var key_sec1_: [Scheme.PublicKey.uncompressed_sec1_encoded_length]u8 = undefined;
     const key_sec1 = try fmt.hexToBytes(&key_sec1_, vector.key);
-    _ = key_sec1;
     const pk = try Scheme.PublicKey.fromSec1(key_sec1);
     var msg_: [20]u8 = undefined;
     const msg = try fmt.hexToBytes(&msg_, vector.msg);
-    _ = msg;
     var sig_der_: [152]u8 = undefined;
     const sig_der = try fmt.hexToBytes(&sig_der_, vector.sig);
     const sig = try Scheme.Signature.fromDer(sig_der);
-    _ = sig;
     try sig.verify(msg, pk);
 }
