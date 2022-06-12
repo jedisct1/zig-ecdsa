@@ -8,6 +8,11 @@ const IdentityElementError = crypto.errors.IdentityElementError;
 const NonCanonicalError = crypto.errors.NonCanonicalError;
 const SignatureVerificationError = crypto.errors.SignatureVerificationError;
 
+/// ECDSA over P-256 with SHA-256.
+pub const EcdsaP256Sha256 = Ecdsa(crypto.ecc.P256, crypto.hash.sha2.Sha256);
+/// ECDSA over P-384 with SHA-384.
+pub const EcdsaP384Sha384 = Ecdsa(crypto.ecc.P384, crypto.hash.sha2.Sha384);
+
 pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
     const Hmac = crypto.auth.hmac.Hmac(Hash);
 
@@ -190,9 +195,9 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
             pub fn create(seed: ?[seed_length]u8) IdentityElementError!KeyPair {
                 var seed_ = seed;
                 if (seed_ == null) {
-                    const random_seed: [seed_length]u8 = undefined;
+                    var random_seed: [seed_length]u8 = undefined;
                     crypto.random.bytes(&random_seed);
-                    seed_ = &random_seed;
+                    seed_ = random_seed;
                 }
                 const h = [_]u8{0x00} ** Hash.digest_length;
                 const k0 = [_]u8{0x01} ** SecretKey.encoded_length;
@@ -283,10 +288,7 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
 }
 
 pub fn main() anyerror!void {
-    const Curve = crypto.ecc.P256;
-    const Hash = crypto.hash.sha2.Sha256;
-
-    const Scheme = Ecdsa(Curve, Hash);
+    const Scheme = EcdsaP256Sha256;
     const kp = try Scheme.KeyPair.create(null);
     const msg = "test";
 
