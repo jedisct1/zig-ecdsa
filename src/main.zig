@@ -1,7 +1,7 @@
 const std = @import("std");
 const crypto = std.crypto;
 const fmt = std.fmt;
-const io = std.io;
+const Io = std.Io;
 const mem = std.mem;
 const testing = std.testing;
 
@@ -84,8 +84,8 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
             /// Return IdentityElement or NonCanonical if the public key or signature are not in the expected range,
             /// or SignatureVerificationError if the signature is invalid for the given message and key.
             pub fn verify(self: Signature, msg: []const u8, public_key: PublicKey) (IdentityElementError || NonCanonicalError || SignatureVerificationError)!void {
-                const r = try Curve.scalar.Scalar.fromBytes(self.r, .Big);
-                const s = try Curve.scalar.Scalar.fromBytes(self.s, .Big);
+                const r = try Curve.scalar.Scalar.fromBytes(self.r, .big);
+                const s = try Curve.scalar.Scalar.fromBytes(self.s, .big);
                 if (r.isZero() or s.isZero()) return error.IdentityElement;
 
                 var h: [Hash.digest_length]u8 = undefined;
@@ -98,11 +98,11 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
                 }
 
                 const s_inv = s.invert();
-                const v1 = z.mul(s_inv).toBytes(.Little);
-                const v2 = r.mul(s_inv).toBytes(.Little);
-                const v1g = try Curve.basePoint.mulPublic(v1, .Little);
-                const v2pk = try public_key.p.mulPublic(v2, .Little);
-                const vxs = v1g.add(v2pk).affineCoordinates().x.toBytes(.Big);
+                const v1 = z.mul(s_inv).toBytes(.little);
+                const v2 = r.mul(s_inv).toBytes(.little);
+                const v1g = try Curve.basePoint.mulPublic(v1, .little);
+                const v2pk = try public_key.p.mulPublic(v2, .little);
+                const vxs = v1g.add(v2pk).affineCoordinates().x.toBytes(.big);
                 const vr = reduceToScalar(Curve.Fe.encoded_length, vxs);
                 if (!r.equivalent(vr)) {
                     return error.SignatureVerificationFailed;
@@ -112,8 +112,8 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
             /// Return the raw signature (r, s) in big-endian format.
             pub fn toBytes(self: Signature) [encoded_length]u8 {
                 var bytes: [encoded_length]u8 = undefined;
-                mem.copy(u8, bytes[0 .. encoded_length / 2], &self.r);
-                mem.copy(u8, bytes[encoded_length / 2 ..], &self.s);
+                @memcpy(bytes[0 .. encoded_length / 2], &self.r);
+                @memcpy(bytes[encoded_length / 2 ..], &self.s);
                 return bytes;
             }
 
@@ -130,11 +130,10 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
             /// The maximum length of the DER encoding is der_encoded_max_length.
             /// The function returns a slice, that can be shorter than der_encoded_max_length.
             pub fn toDer(self: Signature, buf: *[der_encoded_max_length]u8) []u8 {
-                var fb = io.fixedBufferStream(buf);
-                const w = fb.writer();
-                const r_len = @intCast(u8, self.r.len + (self.r[0] >> 7));
-                const s_len = @intCast(u8, self.s.len + (self.s[0] >> 7));
-                const seq_len = @intCast(u8, 2 + r_len + 2 + s_len);
+                var w = Io.Writer.fixed(buf);
+                const r_len = @as(u8, @intCast(self.r.len + (self.r[0] >> 7)));
+                const s_len = @as(u8, @intCast(self.s.len + (self.s[0] >> 7)));
+                const seq_len = @as(u8, @intCast(2 + r_len + 2 + s_len));
                 w.writeAll(&[_]u8{ 0x30, seq_len }) catch unreachable;
                 w.writeAll(&[_]u8{ 0x02, r_len }) catch unreachable;
                 if (self.r[0] >> 7 != 0) {
@@ -146,24 +145,23 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
                     w.writeByte(0x00) catch unreachable;
                 }
                 w.writeAll(&self.s) catch unreachable;
-                return fb.getWritten();
+                return w.buffered();
             }
 
             // Read a DER-encoded integer.
-            fn readDerInt(out: []u8, reader: anytype) EncodingError!void {
-                var buf: [2]u8 = undefined;
-                _ = reader.readNoEof(&buf) catch return error.InvalidEncoding;
+            fn readDerInt(out: []u8, reader: *Io.Reader) EncodingError!void {
+                const buf = reader.takeArray(2) catch return error.InvalidEncoding;
                 if (buf[0] != 0x02) return error.InvalidEncoding;
                 var expected_len = @as(usize, buf[1]);
                 if (expected_len == 0 or expected_len > 1 + out.len) return error.InvalidEncoding;
                 var has_top_bit = false;
                 if (expected_len == 1 + out.len) {
-                    if ((reader.readByte() catch return error.InvalidEncoding) != 0) return error.InvalidEncoding;
+                    if ((reader.takeByte() catch return error.InvalidEncoding) != 0) return error.InvalidEncoding;
                     expected_len -= 1;
                     has_top_bit = true;
                 }
                 const out_slice = out[out.len - expected_len ..];
-                reader.readNoEof(out_slice) catch return error.InvalidEncoding;
+                reader.readSliceAll(out_slice) catch return error.InvalidEncoding;
                 if (has_top_bit and out[0] >> 7 == 0) return error.InvalidEncoding;
             }
 
@@ -171,16 +169,14 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
             /// Returns InvalidEncoding if the DER encoding is invalid.
             pub fn fromDer(der: []const u8) EncodingError!Signature {
                 var sig: Signature = mem.zeroInit(Signature, .{});
-                var fb = io.fixedBufferStream(der);
-                const reader = fb.reader();
-                var buf: [2]u8 = undefined;
-                _ = reader.readNoEof(&buf) catch return error.InvalidEncoding;
+                var reader = Io.Reader.fixed(der);
+                const buf = reader.takeArray(2) catch return error.InvalidEncoding;
                 if (buf[0] != 0x30 or @as(usize, buf[1]) + 2 != der.len) {
                     return error.InvalidEncoding;
                 }
-                try readDerInt(&sig.r, reader);
-                try readDerInt(&sig.s, reader);
-                if (fb.getPos() catch unreachable != der.len) return error.InvalidEncoding;
+                try readDerInt(&sig.r, &reader);
+                try readDerInt(&sig.s, &reader);
+                if (reader.seek != der.len) return error.InvalidEncoding;
 
                 return sig;
             }
@@ -202,18 +198,20 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
                 var seed_ = seed;
                 if (seed_ == null) {
                     var random_seed: [seed_length]u8 = undefined;
-                    crypto.random.bytes(&random_seed);
+                    var threaded: Io.Threaded = .init_single_threaded;
+                    defer threaded.deinit();
+                    threaded.io().randomSecure(&random_seed) catch @panic("unable to obtain random bytes");
                     seed_ = random_seed;
                 }
-                const h = [_]u8{0x00} ** Hash.digest_length;
-                const k0 = [_]u8{0x01} ** SecretKey.encoded_length;
-                const secret_key = deterministicScalar(h, k0, seed_).toBytes(.Big);
+                const h = @as([Hash.digest_length]u8, @splat(0x00));
+                const k0 = @as([SecretKey.encoded_length]u8, @splat(0x01));
+                const secret_key = deterministicScalar(h, k0, seed_).toBytes(.big);
                 return fromSecretKey(SecretKey{ .bytes = secret_key });
             }
 
             /// Return the public key corresponding to the secret key.
             pub fn fromSecretKey(secret_key: SecretKey) IdentityElementError!KeyPair {
-                const public_key = try Curve.basePoint.mul(secret_key.bytes, .Big);
+                const public_key = try Curve.basePoint.mul(secret_key.bytes, .big);
                 return KeyPair{ .secret_key = secret_key, .public_key = PublicKey{ .p = public_key } };
             }
 
@@ -233,58 +231,56 @@ pub fn Ecdsa(comptime Curve: type, comptime Hash: type) type {
 
                 const k = deterministicScalar(h, secret_key.bytes, noise);
 
-                const p = try Curve.basePoint.mul(k.toBytes(.Big), .Big);
-                const xs = p.affineCoordinates().x.toBytes(.Big);
+                const p = try Curve.basePoint.mul(k.toBytes(.big), .big);
+                const xs = p.affineCoordinates().x.toBytes(.big);
                 const r = reduceToScalar(Curve.Fe.encoded_length, xs);
                 if (r.isZero()) return error.IdentityElement;
 
                 const k_inv = k.invert();
-                const zrs = z.add(r.mul(try Curve.scalar.Scalar.fromBytes(secret_key.bytes, .Big)));
+                const zrs = z.add(r.mul(try Curve.scalar.Scalar.fromBytes(secret_key.bytes, .big)));
                 const s = k_inv.mul(zrs);
                 if (s.isZero()) return error.IdentityElement;
 
-                return Signature{ .r = r.toBytes(.Big), .s = s.toBytes(.Big) };
+                return Signature{ .r = r.toBytes(.big), .s = s.toBytes(.big) };
             }
         };
 
         // Reduce the coordinate of a field element to the scalar field.
         fn reduceToScalar(comptime unreduced_len: usize, s: [unreduced_len]u8) Curve.scalar.Scalar {
             if (unreduced_len >= 48) {
-                var xs = [_]u8{0} ** 64;
-                mem.copy(u8, xs[xs.len - s.len ..], s[0..]);
-                return Curve.scalar.Scalar.fromBytes64(xs, .Big);
+                var xs = @as([64]u8, @splat(0));
+                @memcpy(xs[xs.len - s.len ..], s[0..]);
+                return Curve.scalar.Scalar.fromBytes64(xs, .big);
             }
-            var xs = [_]u8{0} ** 48;
-            mem.copy(u8, xs[xs.len - s.len ..], s[0..]);
-            return Curve.scalar.Scalar.fromBytes48(xs, .Big);
+            var xs = @as([48]u8, @splat(0));
+            @memcpy(xs[xs.len - s.len ..], s[0..]);
+            return Curve.scalar.Scalar.fromBytes48(xs, .big);
         }
 
         // Create a deterministic scalar according to a secret key and optional noise.
         // This uses the overly conservative scheme from the "Deterministic ECDSA and EdDSA Signatures with Additional Randomness" draft.
         fn deterministicScalar(h: [Hash.digest_length]u8, secret_key: Curve.scalar.CompressedScalar, noise: ?[noise_length]u8) Curve.scalar.Scalar {
-            var k = [_]u8{0x00} ** h.len;
-            var m = [_]u8{0x00} ** (h.len + 1 + noise_length + secret_key.len + h.len);
+            var k = @as([h.len]u8, @splat(0x00));
+            var m = @as([h.len + 1 + noise_length + secret_key.len + h.len]u8, @splat(0x00));
             const m_v = m[0..h.len];
             const m_i = &m[m_v.len];
             const m_z = m[m_v.len + 1 ..][0..noise_length];
             const m_x = m[m_v.len + 1 + noise_length ..][0..secret_key.len];
             const m_h = m[m.len - h.len ..];
 
-            mem.set(u8, m_v, 0x01);
+            @memset(m_v, 0x01);
             m_i.* = 0x00;
-            if (noise) |n| mem.copy(u8, m_z, &n);
-            mem.copy(u8, m_x, &secret_key);
-            mem.copy(u8, m_h, &h);
+            if (noise) |n| @memcpy(m_z, &n);
+            @memcpy(m_x, &secret_key);
+            @memcpy(m_h, &h);
             Hmac.create(&k, &m, &k);
             Hmac.create(m_v, m_v, &k);
-            mem.copy(u8, m_v, m_v);
             m_i.* = 0x01;
             Hmac.create(&k, &m, &k);
             Hmac.create(m_v, m_v, &k);
             while (true) {
                 Hmac.create(m_v, m_v, &k);
-                if (Curve.scalar.Scalar.fromBytes(m_v[0..Curve.scalar.encoded_length].*, .Big)) |s| return s else |_| {}
-                mem.copy(u8, m_v, m_v);
+                if (Curve.scalar.Scalar.fromBytes(m_v[0..Curve.scalar.encoded_length].*, .big)) |s| return s else |_| {}
                 m_i.* = 0x00;
                 Hmac.create(&k, m[0 .. m_v.len + 1], &k);
                 Hmac.create(m_v, m_v, &k);
@@ -299,7 +295,7 @@ test "ECDSA - Basic operations" {
     const msg = "test";
 
     var noise: [Scheme.noise_length]u8 = undefined;
-    crypto.random.bytes(&noise);
+    std.testing.io.random(&noise);
     const sig = try kp.sign(msg, noise);
     try sig.verify(msg, kp.public_key);
 
